@@ -172,43 +172,173 @@ with transfervisualisation:
 	pass 
 
 
-def login():
-    """Login to AWS SSO — mirrors `make login`."""
-    print("Logging into AWS SSO...")
-    aws_profile = os.environ.get("AWS_PROFILE")
-    if not aws_profile:
-        print("ERROR: AWS_PROFILE environment variable is not set.")
+#!/usr/bin/env python3
+"""
+create_api_reference.py
+~~~~~~~~~~~~~~~~~~~~~~~
+Hits the two API endpoints and saves the responses as local JSON reference files.
+
+Usage:
+    python scripts/create_api_reference.py
+"""
+
+import json
+import os
+import requests
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+BASE_URL = "http://localhost:8000"
+REFERENCE_DIR = os.path.join(os.path.dirname(__file__), "api_reference")
+
+ENDPOINTS = {
+    "metrics": f"{BASE_URL}/metrics",
+    "metrics_summary": f"{BASE_URL}/metrics-summary",
+}
+
+# ---------------------------------------------------------------------------
+# Data fetching (separated so it can be reused for GraphQL later)
+# ---------------------------------------------------------------------------
+
+def fetch_endpoint(url: str) -> dict:
+    """Fetch JSON data from a single endpoint."""
+    print(f"Hitting {url}...")
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_all() -> dict:
+    """Fetch data from all endpoints and return as a dict."""
+    return {name: fetch_endpoint(url) for name, url in ENDPOINTS.items()}
+
+# ---------------------------------------------------------------------------
+# Saving
+# ---------------------------------------------------------------------------
+
+def save_reference(data: dict) -> None:
+    """Save each endpoint response as a JSON reference file."""
+    os.makedirs(REFERENCE_DIR, exist_ok=True)
+    for name, response in data.items():
+        path = os.path.join(REFERENCE_DIR, f"{name}.json")
+        with open(path, "w") as f:
+            json.dump(response, f, indent=2)
+        print(f"Saved reference: {path}")
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("Creating API reference files...")
+    data = fetch_all()
+    save_reference(data)
+    print("Done! Reference files saved to scripts/api_reference/")
+
+
+
+
+
+#!/usr/bin/env python3
+"""
+check_api_reference.py
+~~~~~~~~~~~~~~~~~~~~~~
+Hits the two API endpoints and compares responses to the saved reference files.
+Shows a clear diff if anything has changed.
+
+Usage:
+    python scripts/check_api_reference.py
+"""
+
+import json
+import os
+import sys
+from difflib import unified_diff
+
+import requests
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+BASE_URL = "http://localhost:8000"
+REFERENCE_DIR = os.path.join(os.path.dirname(__file__), "api_reference")
+
+ENDPOINTS = {
+    "metrics": f"{BASE_URL}/metrics",
+    "metrics_summary": f"{BASE_URL}/metrics-summary",
+}
+
+# ---------------------------------------------------------------------------
+# Data fetching (separated so it can be reused for GraphQL later)
+# ---------------------------------------------------------------------------
+
+def fetch_endpoint(url: str) -> dict:
+    """Fetch JSON data from a single endpoint."""
+    print(f"Hitting {url}...")
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_all() -> dict:
+    """Fetch data from all endpoints and return as a dict."""
+    return {name: fetch_endpoint(url) for name, url in ENDPOINTS.items()}
+
+# ---------------------------------------------------------------------------
+# Comparing
+# ---------------------------------------------------------------------------
+
+def load_reference(name: str) -> dict:
+    """Load a saved reference JSON file."""
+    path = os.path.join(REFERENCE_DIR, f"{name}.json")
+    if not os.path.exists(path):
+        print(f"ERROR: No reference file found for '{name}'. Run create_api_reference first.")
         sys.exit(1)
-    result = subprocess.run(["aws", "sso", "login", "--profile", aws_profile])
-    sys.exit(result.returncode)
+    with open(path) as f:
+        return json.load(f)
 
 
-def security_tripwires_update():
-    """Update security tripwires hashes — mirrors `make security_tripwires_update`."""
-    print("Updating security tripwires...")
-    result = subprocess.run(
-        ["poetry", "run", "python3", "../scripts/security-tripwires.py", "--update"],
-        cwd="backend"
-    )
-    sys.exit(result.returncode)
+def compare(name: str, reference: dict, live: dict) -> bool:
+    """Compare reference and live responses. Returns True if they match."""
+    reference_str = json.dumps(reference, indent=2).splitlines()
+    live_str = json.dumps(live, indent=2).splitlines()
 
+    diff = list(unified_diff(
+        reference_str,
+        live_str,
+        fromfile=f"{name} (reference)",
+        tofile=f"{name} (live)",
+        lineterm=""
+    ))
 
-def security_tripwires_check():
-    """Check security tripwires — mirrors `make security_tripwires_check`."""
-    print("Checking security tripwires...")
-    result = subprocess.run(
-        ["poetry", "run", "python3", "../scripts/security-tripwires.py"],
-        cwd="backend"
-    )
-    sys.exit(result.returncode)
+    if not diff:
+        print(f"✅ {name}: No changes detected.")
+        return True
+    else:
+        print(f"❌ {name}: Changes detected!")
+        print("\n".join(diff))
+        return False
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
-def security_bandit():
-    """Run bandit security scanner — mirrors `make security_bandit`."""
-    print("Running bandit security scanner (matches CI configuration)...")
-    subprocess.run(["poetry", "install", "--extras", "dev"], cwd="backend")
-    result = subprocess.run(
-        ["poetry", "run", "bandit", "-c", "pyproject.toml", "-r", ".", "--format=screen"],
-        cwd="backend"
-    )
-    sys.exit(result.returncode)
+if __name__ == "__main__":
+    print("Checking API reference...")
+    live_data = fetch_all()
+    all_match = True
+
+    for name, live_response in live_data.items():
+        reference = load_reference(name)
+        match = compare(name, reference, live_response)
+        if not match:
+            all_match = False
+
+    if not all_match:
+        print("\nAPI responses have changed since reference was created.")
+        sys.exit(1)
+    else:
+        print("\nAll endpoints match the reference. No changes detected.")
